@@ -1,502 +1,725 @@
-// Force scroll to top on refresh/load to prevent layout overlap
+// Force scroll to top on refresh/load
 if (history.scrollRestoration) {
   history.scrollRestoration = "manual";
 }
 window.scrollTo(0, 0);
 
 const canvas = document.querySelector("#heartCanvas");
-const ctx = canvas.getContext("2d", { alpha: true });
 const cursorLight = document.querySelector(".cursor-light");
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-const pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-let mouseActive = false;
+const pointer = { x: 0, y: 0 };
+let targetRotationX = 0;
+let targetRotationY = 0;
 
-let width = 0;
-let height = 0;
-let dpr = 1;
-let particles = [];
-let sparks = [];
-let rafId = 0;
+let width = window.innerWidth;
+let height = window.innerHeight;
+
+// --- Three.js Setup ---
+let scene, camera, renderer, heartPoints, material, clock;
+let orbitGroup;
 
 const palette = [
-  [103, 247, 255], // cyan
-  [115, 167, 255], // blue
-  [255, 255, 255], // white
-  [198, 167, 255], // violet
-  [255, 79, 145], // pink
+  new THREE.Color(0.40, 0.97, 1.00), // cyan #67f7ff
+  new THREE.Color(0.45, 0.65, 1.00), // blue #73a7ff
+  new THREE.Color(0.76, 0.94, 1.00), // soft ice #c2f0ff
+  new THREE.Color(0.78, 0.65, 1.00), // violet #c6a7ff
+  new THREE.Color(1.00, 0.31, 0.57), // pink #ff4f91
 ];
 
-// GSAP Animatable Heart parameters
+// GSAP Animatable parameters
 const heartParams = {
-  scaleMultiplier: 1.0,
-  opacityMultiplier: 1.0,
-  centerXOffset: 0, // 0 (center) to 1 (right 0.62)
-  centerYOffset: 0,
-  blurGlow: 0 // extra blur factor
+  scale: 1.0,
+  opacity: 1.0,
+  assemble: prefersReducedMotion ? 1.0 : 0.0,
+  xOffset: 0,
+  yOffset: 0,
+  rotationY: 0
 };
 
-// Pre-rendered offscreen canvases for glow particles
-let glowSprites = [];
+// ---------- Vertex Shader ----------
+const vertexShader = `
+  uniform float uTime;
+  uniform float uSizeMultiplier;
+  uniform float uScale;
+  uniform float uAssembleProgress;
+  uniform vec2 uPointer;
+  uniform float uHoverActive;
+  attribute float aSize;
+  attribute vec3 aStartPosition;
+  attribute float aDelay;
+  attribute float aStream;
+  attribute float aTurbulence;
+  varying vec3 vColor;
+  varying float vTwinkle;
+  varying float vFlowAlpha;
+  varying float vGlow;
 
-function preRenderGlows() {
-  glowSprites = palette.map(([r, g, b]) => {
-    const size = 64;
-    const offscreen = document.createElement("canvas");
-    offscreen.width = size;
-    offscreen.height = size;
-    const oCtx = offscreen.getContext("2d");
-    
-    const grad = oCtx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 1)`);
-    grad.addColorStop(0.12, `rgba(${r}, ${g}, ${b}, 0.9)`);
-    grad.addColorStop(0.3, `rgba(${r}, ${g}, ${b}, 0.3)`);
-    grad.addColorStop(0.55, `rgba(${r}, ${g}, ${b}, 0.08)`);
-    grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
-    
-    oCtx.fillStyle = grad;
-    oCtx.beginPath();
-    oCtx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
-    oCtx.fill();
-    
-    return offscreen;
+  void main() {
+    vColor = color;
+
+    float activeWindow = max(0.22, 1.0 - aDelay);
+    float progress = clamp((uAssembleProgress - aDelay) / activeWindow, 0.0, 1.0);
+    float easedProgress = progress * progress * (3.0 - 2.0 * progress);
+
+    vec3 flowPosition = mix(aStartPosition, position, easedProgress);
+
+    // Interactive mouse repulsion in 3D space
+    if (uHoverActive > 0.5 && easedProgress > 0.1) {
+      // Map WebGL normalized mouse to 3D heart coordinate region
+      vec3 mouse3D = vec3(uPointer.x * 18.0, uPointer.y * 11.0, 0.0);
+      float distToMouse = distance(flowPosition, mouse3D);
+      if (distToMouse < 6.8) {
+        float force = (6.8 - distToMouse) / 6.8;
+        vec3 pushDir = normalize(flowPosition - mouse3D);
+        // Push particles slightly outwards
+        flowPosition += pushDir * force * 1.8 * uHoverActive * easedProgress;
+      }
+    }
+
+    float drift = 1.0 - easedProgress;
+    float sprayAngle = aStream * 6.2831853;
+    float sprayPower = 0.6 + 0.4 * sin(aStream * 24.0);
+    float fountainArc = sin(progress * 3.1415926);
+    float launchWindow = smoothstep(0.01, 0.12, progress) * (1.0 - smoothstep(0.55, 0.92, progress));
+    float jetPulse = 0.8 + 0.2 * sin(uTime * 14.0 + aStream * 22.0);
+
+    flowPosition.x += cos(sprayAngle) * fountainArc * launchWindow * (2.6 + sprayPower * 3.8) * aTurbulence;
+    flowPosition.y += fountainArc * launchWindow * jetPulse * (6.4 + sprayPower * 5.6);
+    flowPosition.z += sin(sprayAngle) * fountainArc * launchWindow * (1.8 + sprayPower * 2.8) * aTurbulence;
+
+    float turbFreq = aTurbulence * 1.2;
+    flowPosition.x += sin(uTime * 3.2 + aStream * 11.0) * 0.9 * drift * turbFreq;
+    flowPosition.y += sin(uTime * 4.8 + aStream * 15.0) * 0.35 * drift * turbFreq;
+    flowPosition.z += cos(uTime * 2.8 + aStream * 9.0) * 0.7 * drift * turbFreq;
+
+    vTwinkle = 0.65 + 0.35 * sin(uTime * 2.8 + position.x * 0.3 + position.y * 0.22);
+
+    float lockGlow = smoothstep(0.75, 1.0, easedProgress);
+    vGlow = 1.0 + lockGlow * 0.6;
+
+    vFlowAlpha = mix(0.55, 1.0, easedProgress) + launchWindow * 0.22;
+
+    vec4 mvPosition = modelViewMatrix * vec4(flowPosition, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = aSize * uSizeMultiplier * (360.0 / -mvPosition.z) * (0.78 + 0.22 * vTwinkle) * uScale * vGlow;
+  }
+`;
+
+// ---------- Fragment Shader ----------
+const fragmentShader = `
+  uniform float uOpacity;
+  varying vec3 vColor;
+  varying float vTwinkle;
+  varying float vFlowAlpha;
+  varying float vGlow;
+
+  void main() {
+    vec2 center = gl_PointCoord - vec2(0.5);
+    float dist = length(center);
+    if (dist > 0.5) discard;
+
+    float core = smoothstep(0.5, 0.08, dist);
+    float halo = smoothstep(0.5, 0.0, dist) * 0.4;
+    float alpha = core + halo;
+
+    gl_FragColor = vec4(vColor * vGlow, alpha * vTwinkle * vFlowAlpha * uOpacity * 0.48);
+  }
+`;
+
+function getCameraDistance() {
+  return width < 768 ? 64 : 44;
+}
+
+function getHeartShapeScale() {
+  return width < 768 ? 0.46 : 0.64;
+}
+
+function getHeartYOffset() {
+  return width < 768 ? 5.6 : 4.4;
+}
+
+function getPointSizeMultiplier(dpr) {
+  if (width < 768) {
+    return dpr > 1 ? 3.8 : 5.2;
+  }
+  return dpr > 1 ? 3.4 : 4.8;
+}
+
+function initThree() {
+  clock = new THREE.Clock();
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+  camera.position.z = getCameraDistance();
+
+  renderer = new THREE.WebGLRenderer({
+    canvas: canvas,
+    antialias: true,
+    alpha: true,
+    powerPreference: "high-performance"
   });
+
+  updateRendererSize();
+
+  const particleCount = width < 768 ? 2800 : 4200;
+  const geometry = new THREE.BufferGeometry();
+  const positions = new Float32Array(particleCount * 3);
+  const startPositions = new Float32Array(particleCount * 3);
+  const colors = new Float32Array(particleCount * 3);
+  const sizes = new Float32Array(particleCount);
+  const delays = new Float32Array(particleCount);
+  const streams = new Float32Array(particleCount);
+  const turbulences = new Float32Array(particleCount);
+  const shapeScale = getHeartShapeScale();
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (let i = 0; i < particleCount; i++) {
+    const theta = Math.random() * Math.PI;
+    const phi = Math.random() * Math.PI * 2;
+    const sinTheta = Math.sin(theta);
+    const cosTheta = Math.cos(theta);
+
+    const rx = 16 * (sinTheta ** 3);
+    const ry = 13 * cosTheta - 5 * Math.cos(2 * theta) - 2 * Math.cos(3 * theta) - Math.cos(4 * theta);
+    const r = 0.58 + 0.42 * Math.pow(Math.random(), 0.5);
+
+    let x = rx * Math.cos(phi) * r * shapeScale;
+    let z = rx * Math.sin(phi) * r * 0.58 * shapeScale;
+    let y = (ry * r + 2.5) * shapeScale;
+
+    const notchStrength = Math.max(0, cosTheta) * (1.0 - Math.abs(Math.cos(phi))) * 1.2;
+    y += notchStrength * shapeScale;
+
+    x += (Math.random() - 0.5) * 0.38;
+    y += (Math.random() - 0.5) * 0.38;
+    z += (Math.random() - 0.5) * 0.38;
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+
+    const color = palette[Math.floor(Math.random() * palette.length)];
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+
+    sizes[i] = Math.random() * 0.38 + 0.14;
+    streams[i] = Math.random();
+    turbulences[i] = 0.6 + Math.random() * 0.8;
+  }
+
+  const flowFloor = minY - (width < 768 ? 34 : 30);
+  const yRange = Math.max(1, maxY - minY);
+  const spawnSpreadX = width < 768 ? 3.2 : 5.0;
+  const spawnSpreadZ = width < 768 ? 2.0 : 3.5;
+
+  for (let i = 0; i < particleCount; i++) {
+    const y = positions[i * 3 + 1];
+    const verticalProgress = (y - minY) / yRange;
+    const streamVal = streams[i];
+
+    const angle = streamVal * Math.PI * 2;
+    const radius = Math.pow(Math.random(), 0.7) * spawnSpreadX;
+    startPositions[i * 3] = Math.cos(angle) * radius;
+    startPositions[i * 3 + 1] = flowFloor - Math.random() * 12 - verticalProgress * 5;
+    startPositions[i * 3 + 2] = Math.sin(angle) * radius * (spawnSpreadZ / spawnSpreadX);
+
+    delays[i] = Math.min(0.82, verticalProgress * 0.62 + Math.random() * 0.16);
+  }
+
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('aStartPosition', new THREE.BufferAttribute(startPositions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute('aDelay', new THREE.BufferAttribute(delays, 1));
+  geometry.setAttribute('aStream', new THREE.BufferAttribute(streams, 1));
+  geometry.setAttribute('aTurbulence', new THREE.BufferAttribute(turbulences, 1));
+
+  material = new THREE.ShaderMaterial({
+    vertexShader: vertexShader,
+    fragmentShader: fragmentShader,
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 1.0 },
+      uSizeMultiplier: { value: getPointSizeMultiplier(Math.min(window.devicePixelRatio || 1, 2)) },
+      uScale: { value: 1.0 },
+      uAssembleProgress: { value: heartParams.assemble },
+      uPointer: { value: new THREE.Vector2(0, 0) },
+      uHoverActive: { value: 0.0 }
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true
+  });
+
+  heartPoints = new THREE.Points(geometry, material);
+  scene.add(heartPoints);
+
+  // Tech orbit rings
+  orbitGroup = new THREE.Group();
+  const ringGeom = new THREE.RingGeometry(15.5, 15.62, 64);
+
+  const ringMat1 = new THREE.MeshBasicMaterial({
+    color: 0x22d3ee, transparent: true, opacity: 0,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+  });
+  ringMat1.userData.baseOpacity = width < 768 ? 0.035 : 0.052;
+  const ring1 = new THREE.Mesh(ringGeom, ringMat1);
+  ring1.rotation.x = Math.PI / 2.3;
+  ring1.rotation.y = 0.2;
+  orbitGroup.add(ring1);
+
+  const ringMat2 = new THREE.MeshBasicMaterial({
+    color: 0xec4899, transparent: true, opacity: 0,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+  });
+  ringMat2.userData.baseOpacity = width < 768 ? 0.025 : 0.04;
+  const ring2 = new THREE.Mesh(ringGeom, ringMat2);
+  ring2.rotation.x = Math.PI / -2.4;
+  ring2.rotation.y = -0.3;
+  orbitGroup.add(ring2);
+
+  scene.add(orbitGroup);
+  animate();
 }
 
-function heartPoint(t) {
-  const x = 16 * Math.sin(t) ** 3;
-  const y =
-    13 * Math.cos(t) -
-    5 * Math.cos(2 * t) -
-    2 * Math.cos(3 * t) -
-    Math.cos(4 * t);
-
-  return { x, y: -y };
-}
-
-function randomBetween(min, max) {
-  return min + Math.random() * (max - min);
-}
-
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
+function updateRendererSize() {
   width = window.innerWidth;
   height = window.innerHeight;
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  createParticles();
+  camera.aspect = width / height;
+  camera.position.z = getCameraDistance();
+  camera.updateProjectionMatrix();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(dpr);
+  if (material) {
+    material.uniforms.uSizeMultiplier.value = getPointSizeMultiplier(dpr);
+  }
 }
 
-function createParticles() {
-  const isMobile = width < 920;
-  const count = Math.floor(Math.min(isMobile ? 1200 : 2600, Math.max(800, width * height * 0.0016)));
-  const scale = Math.min(width, height) * (width < 720 ? 0.012 : 0.016);
-  
-  // Set reference center (always centered at creation, dynamically offset in rendering)
-  const centerX = width * 0.5;
-  const centerY = height * (width < 920 ? 0.46 : 0.44);
-  const depthScale = width < 720 ? 0.74 : 1;
+function animate() {
+  requestAnimationFrame(animate);
+  const time = clock.getElapsedTime();
 
-  particles = Array.from({ length: count }, (_, index) => {
-    const isDust = Math.random() < 0.16;
-    const t = randomBetween(0, Math.PI * 2);
-    const heart = heartPoint(t);
-    const fill = Math.random() ** 0.56;
-    const sidePush = randomBetween(-0.46, 0.46);
-    const depth = randomBetween(-1, 1) * depthScale;
-    const colorIndex = Math.floor(Math.random() * palette.length);
-    const drift = randomBetween(0.25, 1.15);
-    const targetX = centerX + heart.x * scale * fill + depth * 34 + sidePush * 18;
-    const targetY = centerY + heart.y * scale * fill + depth * 18 + randomBetween(-7, 7);
-    const startRadius = randomBetween(58, 118);
+  // Subtle heartbeat pulse
+  const pulseScale = heartParams.scale * (1.0 + Math.sin(time * 2.8) * 0.015);
 
-    return {
-      index,
-      isDust,
-      startX: isDust ? randomBetween(0, width) : centerX + Math.cos(t) * startRadius,
-      startY: isDust ? randomBetween(0, height) : height * 0.85 + Math.sin(t) * 22 + randomBetween(-18, 18),
-      targetX: isDust ? 0 : targetX,
-      targetY: isDust ? 0 : targetY,
-      baseX: isDust ? 0 : targetX,
-      baseY: isDust ? 0 : targetY,
-      colorIndex,
-      depth,
-      phase: randomBetween(0, Math.PI * 2),
-      orbit: randomBetween(0.8, 4.8),
-      drift,
-      size: (isDust ? randomBetween(0.3, 0.9) : randomBetween(0.58, 1.62)) + Math.abs(depth) * 0.34,
-      opacity: isDust ? randomBetween(0.12, 0.38) : randomBetween(0.35, 0.95),
-      delay: isDust ? 0 : (index / count) * 0.72 + Math.random() * 0.22,
-      twinkle: randomBetween(0.4, 1.6),
-      speedX: randomBetween(-0.08, 0.08),
-      speedY: randomBetween(-0.05, -0.22),
-    };
-  });
-}
-
-function easeOutCubic(value) {
-  return 1 - (1 - value) ** 3;
-}
-
-function drawParticle(particle, time, progress, pulse, rotation) {
-  let x, y, alpha;
-  const isMobile = width < 920;
-
-  // Calculate dynamic scroll offsets based on GSAP parameters
-  // Desktop: heart drifts right. Mobile: heart stays centered
-  const scrollOffsetX = isMobile ? 0 : (width * heartParams.centerXOffset * 0.12);
-  const scrollOffsetY = isMobile ? 0 : (height * heartParams.centerYOffset * 0.02);
-
-  if (particle.isDust) {
-    x = particle.startX + particle.speedX * time * 50;
-    y = particle.startY + particle.speedY * time * 50;
-    x = (x % width + width) % width;
-    y = (y % height + height) % height;
-
-    const twinkle = 0.5 + Math.sin(time * particle.twinkle * 1.5 + particle.phase) * 0.5;
-    alpha = particle.opacity * twinkle * heartParams.opacityMultiplier;
-  } else {
-    const appear = Math.max(0, Math.min(1, (progress - particle.delay) / 0.3));
-    const eased = easeOutCubic(appear);
-    
-    // Scale heart geometry dynamically
-    const currentScale = heartParams.scaleMultiplier;
-    
-    const rotateCenter = width * 0.5;
-    const rotateX = (particle.baseX - rotateCenter) * currentScale;
-    const rotateY = (particle.baseY - (height * (isMobile ? 0.46 : 0.44))) * currentScale;
-    
-    const zPush = Math.sin(rotation + particle.depth) * 30;
-    
-    const finalX =
-      rotateCenter +
-      rotateX * Math.cos(rotation) +
-      zPush +
-      Math.cos(time * 0.7 + particle.phase) * particle.orbit +
-      scrollOffsetX;
-      
-    const finalY =
-      (height * (isMobile ? 0.46 : 0.44)) +
-      rotateY +
-      Math.sin(time * 0.9 + particle.phase) * particle.orbit * 0.78 -
-      pulse * 10 +
-      scrollOffsetY;
-
-    const startX = particle.startX + Math.cos(particle.phase + time * 2.8) * 18;
-    const startY = particle.startY + Math.sin(particle.phase + time * 2.1) * 10;
-
-    x = startX + (finalX - startX) * eased;
-    y = startY + (finalY - startY) * eased;
-
-    // Mouse Interaction
-    if (mouseActive && progress > 0.45) {
-      const dx = x - pointer.x;
-      const dy = y - pointer.y;
-      const dist = Math.hypot(dx, dy);
-      const maxDist = isMobile ? 80 : 140;
-      if (dist < maxDist) {
-        const force = (maxDist - dist) / maxDist;
-        const push = force * force * 28 * eased;
-        x += (dx / dist) * push;
-        y += (dy / dist) * push;
-      }
-    }
-
-    const twinkle = 0.64 + Math.sin(time * particle.twinkle * 2.2 + particle.phase) * 0.36;
-    alpha = particle.opacity * eased * twinkle * heartParams.opacityMultiplier;
+  if (material) {
+    material.uniforms.uTime.value = time;
+    material.uniforms.uOpacity.value = heartParams.opacity;
+    material.uniforms.uScale.value = pulseScale;
+    material.uniforms.uAssembleProgress.value = heartParams.assemble;
   }
 
-  const sprite = glowSprites[particle.colorIndex];
-  if (!sprite) return;
-  
-  const sizeMultiplier = (particle.isDust ? 3.0 : (4.5 + pulse * 3.5)) * (1 + heartParams.blurGlow * 1.5);
-  const drawSize = particle.size * sizeMultiplier * (particle.isDust ? 1.0 : heartParams.scaleMultiplier);
-
-  ctx.globalAlpha = alpha;
-  ctx.drawImage(sprite, x - drawSize / 2, y - drawSize / 2, drawSize, drawSize);
-}
-
-function spawnSpark(time) {
-  if (sparks.length > 80 || Math.random() > 0.55) return;
-  const isMobile = width < 920;
-
-  const centerX = width * 0.5 + (isMobile ? 0 : (width * heartParams.centerXOffset * 0.12));
-  const centerY = height * (isMobile ? 0.46 : 0.44) + (isMobile ? 0 : (height * heartParams.centerYOffset * 0.02));
-  const colorIndex = Math.floor(Math.random() * palette.length);
-
-  sparks.push({
-    x: centerX + randomBetween(-150, 150) * heartParams.scaleMultiplier,
-    y: centerY + randomBetween(-140, 110) * heartParams.scaleMultiplier,
-    vx: randomBetween(-0.18, 0.18),
-    vy: randomBetween(0.45, 1.4),
-    life: randomBetween(0.6, 1.35),
-    born: time,
-    colorIndex,
-    size: randomBetween(0.9, 2.2),
-  });
-}
-
-function drawSparks(time) {
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-
-  sparks = sparks.filter((spark) => {
-    const age = time - spark.born;
-    const life = 1 - age / spark.life;
-
-    if (life <= 0) return false;
-
-    spark.x += spark.vx;
-    spark.y += spark.vy;
-
-    const sprite = glowSprites[spark.colorIndex];
-    if (sprite) {
-      const drawSize = spark.size * life * 7 * (1 + heartParams.blurGlow * 1.2);
-      ctx.globalAlpha = life * 0.72 * heartParams.opacityMultiplier;
-      ctx.drawImage(sprite, spark.x - drawSize / 2, spark.y - drawSize / 2, drawSize, drawSize);
-    }
-
-    return true;
-  });
-
-  ctx.restore();
-}
-
-function render(now) {
-  const time = now * 0.001;
-  const introLength = prefersReducedMotion ? 0.01 : 2.8;
-  const progress = Math.min(time / introLength, 1);
-  const heartbeat = Math.max(0, Math.sin(time * 3.6)) ** 18;
-  const slowPulse = Math.sin(time * 1.35) * 0.5 + 0.5;
-  const pulse = (heartbeat * 1.2 + slowPulse * 0.08) * heartParams.scaleMultiplier;
-  const rotation = Math.sin(time * 0.48) * 0.82;
-
-  ctx.clearRect(0, 0, width, height);
-  ctx.globalCompositeOperation = "lighter";
-
-  // Draw particles
-  for (let i = 0; i < particles.length; i++) {
-    drawParticle(particles[i], time, progress, pulse, rotation);
+  if (heartPoints) {
+    const targetYRot = time * 0.14 + targetRotationY + heartParams.rotationY;
+    const targetXRot = Math.sin(time * 0.22) * 0.08 + targetRotationX;
+    heartPoints.rotation.y += (targetYRot - heartPoints.rotation.y) * 0.05;
+    heartPoints.rotation.x += (targetXRot - heartPoints.rotation.x) * 0.05;
+    heartPoints.position.x = heartParams.xOffset;
+    heartPoints.position.y = heartParams.yOffset + getHeartYOffset();
   }
 
-  spawnSpark(time);
-  drawSparks(time);
+  if (orbitGroup) {
+    const ringReveal = Math.max(0, Math.min(1, (heartParams.assemble - 0.72) / 0.28));
+    orbitGroup.children.forEach((ring) => {
+      ring.material.opacity = ring.material.userData.baseOpacity * ringReveal * heartParams.opacity;
+    });
+    orbitGroup.rotation.z = time * 0.06;
+    orbitGroup.rotation.y = Math.sin(time * 0.1) * 0.2;
+    orbitGroup.position.x = heartPoints.position.x;
+    orbitGroup.position.y = heartPoints.position.y;
+    orbitGroup.scale.setScalar(pulseScale);
+  }
 
-  rafId = requestAnimationFrame(render);
+  renderer.render(scene, camera);
 }
 
-function moveCursor(event) {
-  pointer.x = event.clientX;
-  pointer.y = event.clientY;
-  cursorLight.style.left = `${pointer.x}px`;
-  cursorLight.style.top = `${pointer.y}px`;
-  cursorLight.style.opacity = "1";
-  mouseActive = true;
-}
-
-// Window resizing
-window.addEventListener("resize", resize);
-window.addEventListener("pointermove", moveCursor);
-window.addEventListener("pointerleave", () => {
-  cursorLight.style.opacity = "0";
-  mouseActive = false;
+window.addEventListener("resize", () => {
+  updateRendererSize();
+  resizeDustCanvas();
 });
 
-// --- Initialize Lenis & GSAP Cinematic scroll animations ---
-function initScroll() {
-  if (typeof Lenis === "undefined" || typeof gsap === "undefined") {
-    console.warn("Lenis or GSAP not loaded yet, retrying...");
-    setTimeout(initScroll, 100);
-    return;
+// Pointer light tracking, interactive tilting, 3D repulsion, and spotlight mask
+window.addEventListener("pointermove", (event) => {
+  pointer.x = event.clientX;
+  pointer.y = event.clientY;
+
+  if (cursorLight) {
+    cursorLight.style.left = `${pointer.x}px`;
+    cursorLight.style.top = `${pointer.y}px`;
+    cursorLight.style.opacity = "1";
   }
 
-  // 1. Initialize Lenis Smooth Scroll
-  const lenis = new Lenis({
-    duration: 1.2,
-    easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
-    smoothWheel: true,
-    wheelMultiplier: 1.0,
-  });
-
-  // Force scroll to top immediately on init
-  lenis.scrollTo(0, { immediate: true });
-
-  lenis.on('scroll', ScrollTrigger.update);
-
-  gsap.ticker.add((time) => {
-    lenis.raf(time * 1000);
-  });
-
-  gsap.ticker.lagSmoothing(0);
-
-  // Allow clicking on scroll indicator to scroll down
-  const indicator = document.querySelector("#scroll-indicator");
-  if (indicator) {
-    indicator.addEventListener("click", () => {
-      lenis.scrollTo("#profile");
-    });
+  // Update spotlight reveal overlay
+  const revealMask = document.querySelector(".reveal-mask");
+  if (revealMask) {
+    revealMask.style.setProperty("--mouse-x", `${pointer.x}px`);
+    revealMask.style.setProperty("--mouse-y", `${pointer.y}px`);
+    revealMask.style.opacity = "1";
   }
 
-  // 2. Setup GSAP ScrollTrigger Animations
-  // Register ScrollTrigger plugin
-  gsap.registerPlugin(ScrollTrigger);
-  ScrollTrigger.clearScrollMemory();
+  const nx = (pointer.x / width) - 0.5;
+  const ny = (pointer.y / height) - 0.5;
+  targetRotationY = nx * 0.35;
+  targetRotationX = ny * 0.25;
 
-  // Transition timeline for Intro Page Scroll
-  const introTL = gsap.timeline({
-    scrollTrigger: {
-      trigger: "#intro",
-      start: "top top",
-      end: "bottom top",
-      scrub: true,
-      pin: true,
-      pinSpacing: true,
+  if (material) {
+    // Map screen cursor coords to WebGL coordinates (-1 to 1)
+    const webglX = (pointer.x / width) * 2 - 1;
+    const webglY = -(pointer.y / height) * 2 + 1;
+    material.uniforms.uPointer.value.set(webglX, webglY);
+    material.uniforms.uHoverActive.value = 1.0;
+  }
+});
+
+window.addEventListener("pointerleave", () => {
+  if (cursorLight) {
+    cursorLight.style.opacity = "0";
+  }
+  
+  const revealMask = document.querySelector(".reveal-mask");
+  if (revealMask) {
+    revealMask.style.opacity = "0";
+  }
+
+  targetRotationX = 0;
+  targetRotationY = 0;
+
+  if (material) {
+    material.uniforms.uHoverActive.value = 0.0;
+  }
+});
+
+// =============================================
+// Text Scramble Effect
+// =============================================
+class TextScramble {
+  constructor(el) {
+    this.el = el;
+    this.chars = '!<>-_\\/[]{}—=+*^?#________';
+    this.update = this.update.bind(this);
+  }
+  setText(newText) {
+    const oldText = this.el.innerText;
+    const length = Math.max(oldText.length, newText.length);
+    const promise = new Promise((resolve) => this.resolve = resolve);
+    this.queue = [];
+    for (let i = 0; i < length; i++) {
+      const from = oldText[i] || '';
+      const to = newText[i] || '';
+      const start = Math.floor(Math.random() * 15);
+      const end = start + Math.floor(Math.random() * 15);
+      this.queue.push({ from, to, start, end });
     }
-  });
-
-  // Animate Heart canvas scaling, opacity and blur
-  introTL.to(heartParams, {
-    scaleMultiplier: 0.72,
-    opacityMultiplier: 0.45,
-    centerXOffset: 1.0, // Slide right on desktop
-    centerYOffset: 0.1,
-    blurGlow: 0.5,
-    ease: "none"
-  }, 0);
-
-  // Fade out welcome content
-  introTL.to(".intro-content", {
-    y: -80,
-    opacity: 0,
-    ease: "none"
-  }, 0);
-
-  // Fade out scroll indicator
-  introTL.to("#scroll-indicator", {
-    opacity: 0,
-    y: 20,
-    ease: "none"
-  }, 0);
-
-  // Reveal Profile Content
-  gsap.fromTo(".profile-left > *", 
-    { y: 60, opacity: 0 },
-    {
-      y: 0,
-      opacity: 1,
-      stagger: 0.12,
-      duration: 0.8,
-      ease: "power2.out",
-      scrollTrigger: {
-        trigger: "#profile",
-        start: "top 75%",
-        toggleActions: "play none none reverse"
+    cancelAnimationFrame(this.frameRequest);
+    this.frame = 0;
+    this.update();
+    return promise;
+  }
+  update() {
+    let output = '';
+    let complete = 0;
+    for (let i = 0, n = this.queue.length; i < n; i++) {
+      let { from, to, start, end, char } = this.queue[i];
+      if (this.frame >= end) {
+        complete++;
+        output += to;
+      } else if (this.frame >= start) {
+        if (!char || Math.random() < 0.28) {
+          char = this.randomChar();
+          this.queue[i].char = char;
+        }
+        output += `<span style="opacity: 0.55; color: var(--cyan);">${char}</span>`;
+      } else {
+        output += from;
       }
     }
-  );
-
-  gsap.fromTo(".status-card", 
-    { y: 80, opacity: 0 },
-    {
-      y: 0,
-      opacity: 1,
-      duration: 0.8,
-      ease: "power2.out",
-      scrollTrigger: {
-        trigger: "#profile",
-        start: "top 70%",
-        toggleActions: "play none none reverse"
-      }
+    this.el.innerHTML = output;
+    if (complete === this.queue.length) {
+      this.resolve();
+    } else {
+      this.frameRequest = requestAnimationFrame(this.update);
+      this.frame++;
     }
-  );
-
-  gsap.fromTo(".skill-card", 
-    { y: 40, opacity: 0 },
-    {
-      y: 0,
-      opacity: 1,
-      stagger: 0.08,
-      duration: 0.7,
-      ease: "power2.out",
-      scrollTrigger: {
-        trigger: ".cards-grid",
-        start: "top 80%",
-        toggleActions: "play none none reverse"
-      }
-    }
-  );
-
-  gsap.fromTo(".project-card", 
-    { y: 50, opacity: 0 },
-    {
-      y: 0,
-      opacity: 1,
-      stagger: 0.1,
-      duration: 0.8,
-      ease: "power2.out",
-      scrollTrigger: {
-        trigger: "#projects",
-        start: "top 85%",
-        toggleActions: "play none none reverse"
-      }
-    }
-  );
+  }
+  randomChar() {
+    return this.chars[Math.floor(Math.random() * this.chars.length)];
+  }
 }
 
-// --- Entrance Animation on Load ---
+// =============================================
+// Role Rotator — Text Scramble Cycle
+// =============================================
+const roles = [
+  "Fullstack Software Engineer",
+  "DevOps Engineer",
+  "Cloud Architect"
+];
+
+let currentRoleIndex = 0;
+let roleRotatorStarted = false;
+let scramblerInstance = null;
+
+function initRoleRotator() {
+  const roleEl = document.querySelector(".role-text");
+  if (!roleEl) return;
+
+  roleRotatorStarted = true;
+  scramblerInstance = new TextScramble(roleEl);
+
+  // Cycle roles every 3.5 seconds with text scramble decoding
+  setInterval(() => {
+    currentRoleIndex = (currentRoleIndex + 1) % roles.length;
+    scramblerInstance.setText(roles[currentRoleIndex]);
+  }, 3500);
+}
+
+// =============================================
+// Entrance Animation
+// =============================================
 function runEntranceAnimation() {
   if (typeof gsap === "undefined") return;
 
   const tl = gsap.timeline();
 
-  // Hide initially
-  gsap.set([".cinematic-title", ".intro-subtext", "#scroll-indicator"], { opacity: 0 });
+  // Hide elements initially
+  gsap.set([".cinematic-title", ".role-rotator", ".intro-subtext"], { opacity: 0 });
+  gsap.set(".intro-actions a", { opacity: 0, y: 20 });
 
-  // Fade in background glow first
-  tl.fromTo(".ambient-glow", 
-    { opacity: 0, scale: 0.8 }, 
-    { opacity: 0.15, scale: 1, duration: 1.8, ease: "power2.out" }
+  if (prefersReducedMotion) {
+    gsap.set(heartParams, { assemble: 1, opacity: 0.66, scale: 0.82 });
+    gsap.set(".ambient-glow", { opacity: 0.12, scale: 1 });
+    gsap.set([".cinematic-title", ".role-rotator", ".intro-subtext"], { opacity: 1, y: 0 });
+    gsap.set(".intro-actions a", { opacity: 1, y: 0 });
+    initRoleRotator();
+    return;
+  }
+
+  gsap.set(heartParams, { assemble: 0, opacity: 0.22, scale: 0.85 });
+
+  // 1. Background glow
+  tl.fromTo(".ambient-glow",
+    { opacity: 0, scale: 0.8 },
+    { opacity: 0.15, scale: 1, duration: 1.6, ease: "power2.out" }
   );
 
-  // Heart Canvas scales up nicely
-  tl.fromTo(heartParams, 
-    { scaleMultiplier: 0.1, opacityMultiplier: 0 },
-    { scaleMultiplier: 1.0, opacityMultiplier: 1.0, duration: 1.6, ease: "power3.out" },
-    "-=1.4"
-  );
+  // 2. Heart waterfall assembly
+  tl.to(heartParams, {
+    assemble: 1,
+    opacity: 0.78,
+    scale: 0.90,
+    duration: 4.0,
+    ease: "power2.inOut"
+  }, 0.1);
 
-  // Title cinematic reveal
+  // 3. Title reveal with decode text scramble reveal
   tl.fromTo(".cinematic-title",
-    { y: 50, opacity: 0 },
-    { y: 0, opacity: 1, duration: 1.2, ease: "power3.out" },
+    { y: 60, opacity: 0 },
+    { 
+      y: 0, 
+      opacity: 1, 
+      duration: 1.4, 
+      ease: "power3.out",
+      onStart: () => {
+        const titleEl = document.querySelector(".cinematic-title");
+        if (titleEl) {
+          const titleScrambler = new TextScramble(titleEl);
+          titleScrambler.setText("Welcome to VanPhuTin");
+        }
+      }
+    },
+    "-=1.2"
+  );
+
+  // 4. Role rotator reveal
+  tl.fromTo(".role-rotator",
+    { y: 30, opacity: 0 },
+    {
+      y: 0, opacity: 1, duration: 1.0, ease: "power2.out",
+      onComplete: () => {
+        if (!roleRotatorStarted) initRoleRotator();
+      }
+    },
     "-=0.8"
   );
 
-  // Subtitle reveal
+  // 5. Subtext reveal
   tl.fromTo(".intro-subtext",
     { y: 20, opacity: 0 },
     { y: 0, opacity: 1, duration: 0.8, ease: "power2.out" },
     "-=0.6"
   );
 
-  // Scroll indicator fade in
-  tl.fromTo("#scroll-indicator",
-    { opacity: 0 },
-    { opacity: 1, duration: 0.6 },
-    "-=0.2"
+  // 6. Action buttons staggered reveal
+  tl.fromTo(".intro-actions a",
+    { y: 20, opacity: 0 },
+    { y: 0, opacity: 1, stagger: 0.12, duration: 0.7, ease: "power2.out" },
+    "-=0.5"
   );
 }
 
-// --- Initial boot ---
-preRenderGlows();
-resize();
-cancelAnimationFrame(rafId);
-rafId = requestAnimationFrame(render);
+// =============================================
+// Preloader with Text Scramble Loop
+// =============================================
+let preloaderInterval = null;
+function startPreloader() {
+  const preloader = document.getElementById("preloader");
+  const loaderText = document.querySelector(".loader-text");
+
+  if (!preloader) {
+    runEntranceAnimation();
+    return;
+  }
+
+  // Scramble the preloader loading text dynamically
+  if (loaderText) {
+    const loaderScrambler = new TextScramble(loaderText);
+    let count = 0;
+    const phrases = [
+      "vanphutin loading... 🌸",
+      "vanphutin loading... 💫",
+      "vanphutin loading... ✨",
+      "vanphutin loading... 🚀"
+    ];
+    preloaderInterval = setInterval(() => {
+      count = (count + 1) % phrases.length;
+      loaderScrambler.setText(phrases[count]);
+    }, 1200);
+  }
+
+  // Fade out loading screen quickly after a short delay (fast load)
+  gsap.to(preloader, {
+    opacity: 0,
+    duration: 0.6,
+    delay: 1.4,
+    ease: "power2.out",
+    onComplete: () => {
+      if (preloaderInterval) clearInterval(preloaderInterval);
+      preloader.style.visibility = "hidden";
+      runEntranceAnimation();
+    }
+  });
+}
+
+// =============================================
+// Parallax 2D Dust Layer
+// =============================================
+let dustCanvas, dustCtx;
+let dustParticles = [];
+const maxDust = 50;
+
+function initDustCanvas() {
+  dustCanvas = document.getElementById("dustCanvas");
+  if (!dustCanvas) return;
+  dustCtx = dustCanvas.getContext("2d");
+  resizeDustCanvas();
+
+  dustParticles = [];
+  for (let i = 0; i < maxDust; i++) {
+    dustParticles.push({
+      x: Math.random() * dustCanvas.width,
+      y: Math.random() * dustCanvas.height,
+      size: Math.random() * 1.6 + 0.6,
+      speedX: (Math.random() - 0.5) * 0.16,
+      speedY: (Math.random() - 0.5) * 0.16 - 0.08, // Slow drift up
+      alpha: Math.random() * 0.45 + 0.12,
+      depth: Math.random() * 0.68 + 0.32
+    });
+  }
+
+  animateDust();
+}
+
+function resizeDustCanvas() {
+  if (dustCanvas) {
+    dustCanvas.width = window.innerWidth;
+    dustCanvas.height = window.innerHeight;
+  }
+}
+
+function animateDust() {
+  if (!dustCanvas || !dustCtx) return;
+  requestAnimationFrame(animateDust);
+
+  dustCtx.clearRect(0, 0, dustCanvas.width, dustCanvas.height);
+
+  // Parallax calculations based on pointer offset from center
+  const centerX = window.innerWidth / 2;
+  const centerY = window.innerHeight / 2;
+  const offsetX = (pointer.x - centerX) * 0.022;
+  const offsetY = (pointer.y - centerY) * 0.022;
+
+  dustParticles.forEach((p) => {
+    p.x += p.speedX;
+    p.y += p.speedY;
+
+    if (p.x < 0) p.x = dustCanvas.width;
+    if (p.x > dustCanvas.width) p.x = 0;
+    if (p.y < 0) p.y = dustCanvas.height;
+    if (p.y > dustCanvas.height) p.y = dustCanvas.height;
+
+    const renderX = p.x + offsetX * p.depth;
+    const renderY = p.y + offsetY * p.depth;
+
+    dustCtx.beginPath();
+    dustCtx.arc(renderX, renderY, p.size, 0, Math.PI * 2);
+    dustCtx.fillStyle = `rgba(34, 211, 238, ${p.alpha})`; // Cyan soft tint
+    dustCtx.shadowBlur = 4;
+    dustCtx.shadowColor = "#22d3ee";
+    dustCtx.fill();
+    dustCtx.shadowBlur = 0; // Reset shadow for draw call performance
+  });
+}
+
+// =============================================
+// Custom Cursor Tracker (Dot + Ring)
+// =============================================
+function initCustomCursor() {
+  const hasFinePointer = window.matchMedia("(pointer: fine)").matches;
+  if (!hasFinePointer) return;
+
+  const dot = document.querySelector(".custom-cursor-dot");
+  const ring = document.querySelector(".custom-cursor-ring");
+  if (!dot || !ring) return;
+
+  // Initial offscreen state
+  gsap.set([dot, ring], { xPercent: -50, yPercent: -50, x: -100, y: -100 });
+
+  // Use quickTo for sub-pixel precision and buttery smooth performance
+  const dotX = gsap.quickTo(dot, "x", { duration: 0.08, ease: "power3.out" });
+  const dotY = gsap.quickTo(dot, "y", { duration: 0.08, ease: "power3.out" });
+  const ringX = gsap.quickTo(ring, "x", { duration: 0.35, ease: "power2.out" });
+  const ringY = gsap.quickTo(ring, "y", { duration: 0.35, ease: "power2.out" });
+
+  window.addEventListener("mousemove", (e) => {
+    dotX(e.clientX);
+    dotY(e.clientY);
+    ringX(e.clientX);
+    ringY(e.clientY);
+  });
+
+  // Attach hover styles to links and interactive components
+  const hoverables = document.querySelectorAll("a, button, [role='button'], .primary-action, .secondary-action, .cta-action");
+  hoverables.forEach((el) => {
+    el.addEventListener("mouseenter", () => ring.classList.add("hovered"));
+    el.addEventListener("mouseleave", () => ring.classList.remove("hovered"));
+  });
+
+  // Active click scaling
+  window.addEventListener("mousedown", () => ring.classList.add("clicked"));
+  window.addEventListener("mouseup", () => ring.classList.remove("clicked"));
+}
+
+// --- Boot ---
+initThree();
 
 window.addEventListener("load", () => {
-  initScroll();
-  runEntranceAnimation();
+  initDustCanvas();
+  initCustomCursor();
+  startPreloader();
 });
