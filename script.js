@@ -399,9 +399,10 @@ window.addEventListener("pointerleave", () => {
 // Text Scramble Effect
 // =============================================
 class TextScramble {
-  constructor(el) {
+  constructor(el, speedMultiplier = 1) {
     this.el = el;
     this.chars = '!<>-_\\/[]{}—=+*^?#________';
+    this.speedMultiplier = speedMultiplier;
     this.update = this.update.bind(this);
   }
   setText(newText) {
@@ -412,8 +413,8 @@ class TextScramble {
     for (let i = 0; i < length; i++) {
       const from = oldText[i] || '';
       const to = newText[i] || '';
-      const start = Math.floor(Math.random() * 15);
-      const end = start + Math.floor(Math.random() * 15);
+      const start = Math.floor(Math.random() * 15 * this.speedMultiplier);
+      const end = start + Math.floor(Math.random() * 15 * this.speedMultiplier);
       this.queue.push({ from, to, start, end });
     }
     cancelAnimationFrame(this.frameRequest);
@@ -505,30 +506,30 @@ function runEntranceAnimation() {
   // 1. Background glow
   tl.fromTo(".ambient-glow",
     { opacity: 0, scale: 0.8 },
-    { opacity: 0.15, scale: 1, duration: 1.6, ease: "power2.out" }
+    { opacity: 0.15, scale: 1, duration: 1.2, ease: "power2.out" }
   );
 
-  // 2. Heart waterfall assembly
+  // 2. Heart waterfall assembly (Sped up from 4.0s to 1.8s)
   tl.to(heartParams, {
     assemble: 1,
     opacity: 0.78,
     scale: 0.90,
-    duration: 4.0,
-    ease: "power2.inOut"
+    duration: 1.8,
+    ease: "power2.out"
   }, 0.1);
 
-  // 3. Title reveal with decode text scramble reveal
+  // 3. Title reveal with decode text scramble reveal (Sped up)
   tl.fromTo(".cinematic-title",
     { y: 60, opacity: 0 },
     { 
       y: 0, 
       opacity: 1, 
-      duration: 1.4, 
+      duration: 0.8, 
       ease: "power3.out",
       onStart: () => {
         const titleEl = document.querySelector(".cinematic-title");
         if (titleEl) {
-          const titleScrambler = new TextScramble(titleEl);
+          const titleScrambler = new TextScramble(titleEl, 0.5);
           titleScrambler.setText("Welcome to VanPhuTin");
         }
       }
@@ -540,26 +541,26 @@ function runEntranceAnimation() {
   tl.fromTo(".role-rotator",
     { y: 30, opacity: 0 },
     {
-      y: 0, opacity: 1, duration: 1.0, ease: "power2.out",
+      y: 0, opacity: 1, duration: 0.6, ease: "power2.out",
       onComplete: () => {
         if (!roleRotatorStarted) initRoleRotator();
       }
     },
-    "-=0.8"
+    "-=0.5"
   );
 
   // 5. Subtext reveal
   tl.fromTo(".intro-subtext",
     { y: 20, opacity: 0 },
-    { y: 0, opacity: 1, duration: 0.8, ease: "power2.out" },
-    "-=0.6"
+    { y: 0, opacity: 1, duration: 0.5, ease: "power2.out" },
+    "-=0.4"
   );
 
   // 6. Action buttons staggered reveal
   tl.fromTo(".intro-actions a",
     { y: 20, opacity: 0 },
-    { y: 0, opacity: 1, stagger: 0.12, duration: 0.7, ease: "power2.out" },
-    "-=0.5"
+    { y: 0, opacity: 1, stagger: 0.1, duration: 0.5, ease: "power2.out" },
+    "-=0.3"
   );
 }
 
@@ -576,9 +577,9 @@ function startPreloader() {
     return;
   }
 
-  // Scramble the preloader loading text dynamically
+  // Scramble the preloader loading text dynamically and quickly
   if (loaderText) {
-    const loaderScrambler = new TextScramble(loaderText);
+    const loaderScrambler = new TextScramble(loaderText, 0.4);
     let count = 0;
     const phrases = [
       "vanphutin loading... 🌸",
@@ -589,14 +590,14 @@ function startPreloader() {
     preloaderInterval = setInterval(() => {
       count = (count + 1) % phrases.length;
       loaderScrambler.setText(phrases[count]);
-    }, 1200);
+    }, 350);
   }
 
-  // Fade out loading screen quickly after a short delay (fast load)
+  // Fade out loading screen quickly after a short delay (fast load, reduced delay from 1.4s to 1.0s)
   gsap.to(preloader, {
     opacity: 0,
-    duration: 0.6,
-    delay: 1.4,
+    duration: 0.4,
+    delay: 1.0,
     ease: "power2.out",
     onComplete: () => {
       if (preloaderInterval) clearInterval(preloaderInterval);
