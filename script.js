@@ -11,6 +11,8 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
 const pointer = { x: 0, y: 0 };
 let targetRotationX = 0;
 let targetRotationY = 0;
+let gyroRotationX = 0;
+let gyroRotationY = 0;
 
 let width = window.innerWidth;
 let height = window.innerHeight;
@@ -127,6 +129,42 @@ const fragmentShader = `
   }
 `;
 
+// ---------- Ring Shaders ----------
+const ringVertexShader = `
+  uniform float uTime;
+  uniform float uOpacity;
+  uniform float uSizeMultiplier;
+  attribute float aAngle;
+  varying vec3 vColor;
+  uniform vec3 uColor;
+
+  void main() {
+    vColor = uColor;
+    vec3 pos = position;
+    
+    // Wave displacement based on time and angle
+    pos.y += sin(uTime * 2.2 + aAngle * 4.0) * 0.8;
+    
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = uSizeMultiplier * (300.0 / -mvPosition.z);
+  }
+`;
+
+const ringFragmentShader = `
+  uniform float uOpacity;
+  varying vec3 vColor;
+
+  void main() {
+    vec2 center = gl_PointCoord - vec2(0.5);
+    float dist = length(center);
+    if (dist > 0.5) discard;
+    
+    float intensity = smoothstep(0.5, 0.05, dist);
+    gl_FragColor = vec4(vColor, intensity * uOpacity * 0.7);
+  }
+`;
+
 function getCameraDistance() {
   return width < 768 ? 64 : 44;
 }
@@ -136,7 +174,7 @@ function getHeartShapeScale() {
 }
 
 function getHeartYOffset() {
-  return width < 768 ? 5.6 : 4.4;
+  return width < 768 ? 6.5 : 4.4;
 }
 
 function getPointSizeMultiplier(dpr) {
@@ -161,7 +199,7 @@ function initThree() {
 
   updateRendererSize();
 
-  const particleCount = width < 768 ? 2800 : 4200;
+  const particleCount = width < 768 ? 1600 : 4200;
   const geometry = new THREE.BufferGeometry();
   const positions = new Float32Array(particleCount * 3);
   const startPositions = new Float32Array(particleCount * 3);
@@ -259,30 +297,91 @@ function initThree() {
   heartPoints = new THREE.Points(geometry, material);
   scene.add(heartPoints);
 
-  // Tech orbit rings
+  // Tech orbit rings (particle-based)
   orbitGroup = new THREE.Group();
-  const ringGeom = new THREE.RingGeometry(15.5, 15.62, 64);
-
-  const ringMat1 = new THREE.MeshBasicMaterial({
-    color: 0x22d3ee, transparent: true, opacity: 0,
-    side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+  
+  const ring1Geom = new THREE.BufferGeometry();
+  const ring2Geom = new THREE.BufferGeometry();
+  
+  const ring1ParticlesCount = width < 768 ? 150 : 350;
+  const ring2ParticlesCount = width < 768 ? 120 : 280;
+  
+  const ring1Positions = new Float32Array(ring1ParticlesCount * 3);
+  const ring2Positions = new Float32Array(ring2ParticlesCount * 3);
+  const ring1Angles = new Float32Array(ring1ParticlesCount);
+  const ring2Angles = new Float32Array(ring2ParticlesCount);
+  
+  const ringRadius = 15.0;
+  
+  for (let i = 0; i < ring1ParticlesCount; i++) {
+    const angle = (i / ring1ParticlesCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.02;
+    ring1Angles[i] = angle;
+    const jitterRadius = ringRadius + (Math.random() - 0.5) * 0.8;
+    const x = Math.cos(angle) * jitterRadius;
+    const z = Math.sin(angle) * jitterRadius;
+    const y = (Math.random() - 0.5) * 0.4;
+    ring1Positions[i * 3] = x;
+    ring1Positions[i * 3 + 1] = y;
+    ring1Positions[i * 3 + 2] = z;
+  }
+  
+  for (let i = 0; i < ring2ParticlesCount; i++) {
+    const angle = (i / ring2ParticlesCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.02;
+    ring2Angles[i] = angle;
+    const jitterRadius = ringRadius + (Math.random() - 0.5) * 0.8;
+    const x = Math.cos(angle) * jitterRadius;
+    const z = Math.sin(angle) * jitterRadius;
+    const y = (Math.random() - 0.5) * 0.4;
+    ring2Positions[i * 3] = x;
+    ring2Positions[i * 3 + 1] = y;
+    ring2Positions[i * 3 + 2] = z;
+  }
+  
+  ring1Geom.setAttribute('position', new THREE.BufferAttribute(ring1Positions, 3));
+  ring2Geom.setAttribute('position', new THREE.BufferAttribute(ring2Positions, 3));
+  ring1Geom.setAttribute('aAngle', new THREE.BufferAttribute(ring1Angles, 1));
+  ring2Geom.setAttribute('aAngle', new THREE.BufferAttribute(ring2Angles, 1));
+  
+  const ring1Mat = new THREE.ShaderMaterial({
+    vertexShader: ringVertexShader,
+    fragmentShader: ringFragmentShader,
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 0.0 },
+      uColor: { value: new THREE.Color(0x22d3ee) },
+      uSizeMultiplier: { value: width < 768 ? 2.2 : 3.2 }
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
   });
-  ringMat1.userData.baseOpacity = width < 768 ? 0.035 : 0.052;
-  const ring1 = new THREE.Mesh(ringGeom, ringMat1);
-  ring1.rotation.x = Math.PI / 2.3;
-  ring1.rotation.y = 0.2;
-  orbitGroup.add(ring1);
-
-  const ringMat2 = new THREE.MeshBasicMaterial({
-    color: 0xec4899, transparent: true, opacity: 0,
-    side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+  ring1Mat.userData.baseOpacity = width < 768 ? 0.08 : 0.15;
+  
+  const ring2Mat = new THREE.ShaderMaterial({
+    vertexShader: ringVertexShader,
+    fragmentShader: ringFragmentShader,
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 0.0 },
+      uColor: { value: new THREE.Color(0xec4899) },
+      uSizeMultiplier: { value: width < 768 ? 2.2 : 3.2 }
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
   });
-  ringMat2.userData.baseOpacity = width < 768 ? 0.025 : 0.04;
-  const ring2 = new THREE.Mesh(ringGeom, ringMat2);
-  ring2.rotation.x = Math.PI / -2.4;
-  ring2.rotation.y = -0.3;
-  orbitGroup.add(ring2);
-
+  ring2Mat.userData.baseOpacity = width < 768 ? 0.06 : 0.12;
+  
+  const ring1Points = new THREE.Points(ring1Geom, ring1Mat);
+  ring1Points.rotation.x = Math.PI / 2.3;
+  ring1Points.rotation.y = 0.2;
+  orbitGroup.add(ring1Points);
+  
+  const ring2Points = new THREE.Points(ring2Geom, ring2Mat);
+  ring2Points.rotation.x = Math.PI / -2.4;
+  ring2Points.rotation.y = -0.3;
+  orbitGroup.add(ring2Points);
+  
   scene.add(orbitGroup);
   animate();
 }
@@ -298,6 +397,13 @@ function updateRendererSize() {
   renderer.setPixelRatio(dpr);
   if (material) {
     material.uniforms.uSizeMultiplier.value = getPointSizeMultiplier(dpr);
+  }
+  if (orbitGroup) {
+    orbitGroup.children.forEach((points) => {
+      if (points.material && points.material.uniforms) {
+        points.material.uniforms.uSizeMultiplier.value = width < 768 ? 2.2 : 3.2;
+      }
+    });
   }
 }
 
@@ -316,8 +422,8 @@ function animate() {
   }
 
   if (heartPoints) {
-    const targetYRot = time * 0.14 + targetRotationY + heartParams.rotationY;
-    const targetXRot = Math.sin(time * 0.22) * 0.08 + targetRotationX;
+    const targetYRot = time * 0.14 + targetRotationY + gyroRotationY + heartParams.rotationY;
+    const targetXRot = Math.sin(time * 0.22) * 0.08 + targetRotationX + gyroRotationX;
     heartPoints.rotation.y += (targetYRot - heartPoints.rotation.y) * 0.05;
     heartPoints.rotation.x += (targetXRot - heartPoints.rotation.x) * 0.05;
     heartPoints.position.x = heartParams.xOffset;
@@ -326,8 +432,11 @@ function animate() {
 
   if (orbitGroup) {
     const ringReveal = Math.max(0, Math.min(1, (heartParams.assemble - 0.72) / 0.28));
-    orbitGroup.children.forEach((ring) => {
-      ring.material.opacity = ring.material.userData.baseOpacity * ringReveal * heartParams.opacity;
+    orbitGroup.children.forEach((points) => {
+      if (points.material && points.material.uniforms) {
+        points.material.uniforms.uTime.value = time;
+        points.material.uniforms.uOpacity.value = points.material.userData.baseOpacity * ringReveal * heartParams.opacity;
+      }
     });
     orbitGroup.rotation.z = time * 0.06;
     orbitGroup.rotation.y = Math.sin(time * 0.1) * 0.2;
@@ -457,14 +566,22 @@ class TextScramble {
 // Role Rotator — Text Scramble Cycle
 // =============================================
 const roles = [
-  "Fullstack Software Engineer",
-  "DevOps Engineer",
-  "Cloud Architect"
+  "Fullstack Software Engineer"
 ];
 
 let currentRoleIndex = 0;
 let roleRotatorStarted = false;
 let scramblerInstance = null;
+let titleScramblerInstance = null;
+
+function getTitleScrambler() {
+  const titleEl = document.querySelector(".cinematic-title");
+  if (!titleEl) return null;
+  if (!titleScramblerInstance) {
+    titleScramblerInstance = new TextScramble(titleEl);
+  }
+  return titleScramblerInstance;
+}
 
 function initRoleRotator() {
   const roleEl = document.querySelector(".role-text");
@@ -473,11 +590,55 @@ function initRoleRotator() {
   roleRotatorStarted = true;
   scramblerInstance = new TextScramble(roleEl);
 
-  // Cycle roles every 3.5 seconds with text scramble decoding
-  setInterval(() => {
-    currentRoleIndex = (currentRoleIndex + 1) % roles.length;
-    scramblerInstance.setText(roles[currentRoleIndex]);
-  }, 3500);
+  if (roles.length > 1) {
+    // Cycle roles every 3.5 seconds with text scramble decoding
+    setInterval(() => {
+      currentRoleIndex = (currentRoleIndex + 1) % roles.length;
+      scramblerInstance.setText(roles[currentRoleIndex]);
+    }, 3500);
+  }
+}
+
+// =============================================
+// Looping Animation (Heart and Text)
+// =============================================
+function startLoopingAnimation() {
+  const loopTl = gsap.timeline({ repeat: -1, repeatDelay: 6 }); // loops infinitely with a 6-second delay between cycles
+
+  // 1. Disassemble the heart (melt back into flowing streams)
+  loopTl.to(heartParams, {
+    assemble: 0,
+    opacity: 0.22,
+    scale: 0.85,
+    duration: 1.5,
+    ease: "power2.inOut",
+    onStart: () => {
+      const scrambler = getTitleScrambler();
+      if (scrambler) {
+        scrambler.speedMultiplier = 0.4;
+        scrambler.setText("_______ __ _________");
+      }
+    }
+  });
+
+  // Pause in disassembled state
+  loopTl.to({}, { duration: 1.0 });
+
+  // 2. Reassemble the heart
+  loopTl.to(heartParams, {
+    assemble: 1,
+    opacity: 0.78,
+    scale: 0.90,
+    duration: 1.8,
+    ease: "power2.out",
+    onStart: () => {
+      const scrambler = getTitleScrambler();
+      if (scrambler) {
+        scrambler.speedMultiplier = 0.5;
+        scrambler.setText("Welcome to VanPhuTin");
+      }
+    }
+  });
 }
 
 // =============================================
@@ -527,10 +688,10 @@ function runEntranceAnimation() {
       duration: 0.8, 
       ease: "power3.out",
       onStart: () => {
-        const titleEl = document.querySelector(".cinematic-title");
-        if (titleEl) {
-          const titleScrambler = new TextScramble(titleEl, 0.5);
-          titleScrambler.setText("Welcome to VanPhuTin");
+        const scrambler = getTitleScrambler();
+        if (scrambler) {
+          scrambler.speedMultiplier = 0.5;
+          scrambler.setText("Welcome to VanPhuTin");
         }
       }
     },
@@ -559,7 +720,16 @@ function runEntranceAnimation() {
   // 6. Action buttons staggered reveal
   tl.fromTo(".intro-actions a",
     { y: 20, opacity: 0 },
-    { y: 0, opacity: 1, stagger: 0.1, duration: 0.5, ease: "power2.out" },
+    { 
+      y: 0, 
+      opacity: 1, 
+      stagger: 0.1, 
+      duration: 0.5, 
+      ease: "power2.out",
+      onComplete: () => {
+        startLoopingAnimation();
+      }
+    },
     "-=0.3"
   );
 }
@@ -649,11 +819,20 @@ function animateDust() {
 
   dustCtx.clearRect(0, 0, dustCanvas.width, dustCanvas.height);
 
-  // Parallax calculations based on pointer offset from center
+  // Parallax calculations based on pointer offset or gyroscope tilt
   const centerX = window.innerWidth / 2;
   const centerY = window.innerHeight / 2;
-  const offsetX = (pointer.x - centerX) * 0.022;
-  const offsetY = (pointer.y - centerY) * 0.022;
+  const hasFinePointer = window.matchMedia("(pointer: fine)").matches;
+  
+  let offsetX, offsetY;
+  if (hasFinePointer) {
+    offsetX = (pointer.x - centerX) * 0.022;
+    offsetY = (pointer.y - centerY) * 0.022;
+  } else {
+    // Gyroscope tilt parallax for mobile
+    offsetX = gyroRotationY * 30.0;
+    offsetY = gyroRotationX * 30.0;
+  }
 
   dustParticles.forEach((p) => {
     p.x += p.speedX;
@@ -723,4 +902,26 @@ window.addEventListener("load", () => {
   initDustCanvas();
   initCustomCursor();
   startPreloader();
+});
+
+// Gyroscope orientation tracking for mobile 3D tilt effect
+window.addEventListener("deviceorientation", (event) => {
+  if (event.beta !== null && event.gamma !== null) {
+    // Standard holding tilt ranges
+    const betaBias = 50; 
+    const deltaBeta = event.beta - betaBias;
+    const deltaGamma = event.gamma;
+
+    // Clamp values to prevent extreme rotations
+    const clampBeta = Math.min(Math.max(deltaBeta, -25), 25);
+    const clampGamma = Math.min(Math.max(deltaGamma, -25), 25);
+
+    // Scale down for a subtle parallax effect
+    const targetGyroX = clampBeta * 0.005;
+    const targetGyroY = clampGamma * 0.005;
+
+    // Smooth lerp interpolation
+    gyroRotationX += (targetGyroX - gyroRotationX) * 0.08;
+    gyroRotationY += (targetGyroY - gyroRotationY) * 0.08;
+  }
 });
